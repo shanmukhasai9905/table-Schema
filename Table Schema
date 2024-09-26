@@ -1,0 +1,162 @@
+CREATE TABLE institute (
+    institute_id INT AUTO_INCREMENT PRIMARY KEY NOT NULL,
+    institute_name VARCHAR(100) UNIQUE NOT NULL
+);
+
+CREATE TABLE course (
+    course_id INT AUTO_INCREMENT PRIMARY KEY NOT NULL,
+    institute_id INT NOT NULL,
+    course_name VARCHAR(100) NOT NULL,
+    FOREIGN KEY (institute_id) REFERENCES institute(institute_id)
+);
+
+CREATE TABLE student (
+    student_id INT AUTO_INCREMENT PRIMARY KEY NOT NULL,
+    institute_id INT NOT NULL,
+    course_id INT NOT NULL,
+    student_name VARCHAR(100) NOT NULL,
+    joining_date DATE NOT NULL,
+    FOREIGN KEY (institute_id) REFERENCES institute(institute_id),
+    FOREIGN KEY (course_id) REFERENCES course(course_id)
+);
+
+CREATE TABLE report_student_enrollment (
+    year INT,
+    month INT,
+    institute_name VARCHAR(100),
+    course_name VARCHAR(100),
+    registered_student_count INT
+);
+
+const express = require('express');
+const bodyParser = require('body-parser');
+const { Sequelize, DataTypes } = require('sequelize');
+const multer = require('multer');
+const PDFDocument = require('pdfkit');
+const fs = require('fs');
+
+const app = express();
+app.use(bodyParser.json());
+
+const sequelize = new Sequelize('database_name', 'username', 'password', {
+    host: 'localhost',
+    dialect: 'mysql'
+});
+
+// Define models
+const Institute = sequelize.define('Institute', {
+    institute_id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+    institute_name: { type: DataTypes.STRING, unique: true, allowNull: false }
+});
+
+const Course = sequelize.define('Course', {
+    course_id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+    institute_id: { type: DataTypes.INTEGER, references: { model: Institute, key: 'institute_id' }, allowNull: false },
+    course_name: { type: DataTypes.STRING, allowNull: false }
+});
+
+const Student = sequelize.define('Student', {
+    student_id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+    institute_id: { type: DataTypes.INTEGER, references: { model: Institute, key: 'institute_id' }, allowNull: false },
+    course_id: { type: DataTypes.INTEGER, references: { model: Course, key: 'course_id' }, allowNull: false },
+    student_name: { type: DataTypes.STRING, allowNull: false },
+    joining_date: { type: DataTypes.DATE, allowNull: false }
+});
+
+// Middleware for file upload
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, 'uploads/');
+    },
+    filename: (req, file, cb) => {
+        cb(null, `${req.params.student_id}_${file.originalname}`);
+    }
+});
+const upload = multer({ storage: storage });
+
+// CRUD APIs for Institute
+app.post('/api/institute', async (req, res) => {
+    try {
+        const institute = await Institute.create(req.body);
+        res.json(institute);
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+});
+
+// Repeat similar CRUD operations for Course and Student...
+
+// Search API
+app.post('/api/search', async (req, res) => {
+    const searchString = req.body.search;
+    const results = await sequelize.query(`
+        SELECT i.institute_name, c.course_name, s.student_name, s.joining_date
+        FROM institute i
+        JOIN course c ON i.institute_id = c.institute_id
+        JOIN student s ON s.course_id = c.course_id
+        WHERE i.institute_name LIKE :search OR c.course_name LIKE :search OR s.student_name LIKE :search
+    `, {
+        replacements: { search: `%${searchString}%` },
+        type: Sequelize.QueryTypes.SELECT
+    });
+    res.json(results);
+});
+
+// Stored Procedure for report
+app.post('/api/report', async (req, res) => {
+    await sequelize.query(`
+        CALL GenerateStudentReport(); -- Create the procedure in your MySQL database
+    `);
+    const reportData = await sequelize.query(`SELECT * FROM report_student_enrollment`, { type: Sequelize.QueryTypes.SELECT });
+    res.json(reportData);
+});
+
+// Upload student photo
+app.post('/api/student/photo/:student_id', upload.single('photo'), (req, res) => {
+    res.json({ message: 'Photo uploaded successfully', filePath: req.file.path });
+});
+
+// Generate Student ID Card
+app.get('/api/student/idcard/:student_id', async (req, res) => {
+    const student = await Student.findByPk(req.params.student_id);
+    const doc = new PDFDocument();
+    const filePath = `idcards/student_${student.student_id}.pdf`;
+    doc.pipe(fs.createWriteStream(filePath));
+
+    doc.fontSize(25).text(`ID Card`, { align: 'center' });
+    doc.text(`Name: ${student.student_name}`);
+    doc.text(`Course: ${student.course_id}`); // You may want to fetch the course name
+    doc.text(`Institute: ${student.institute_id}`); // You may want to fetch the institute name
+    doc.text(`Joining Date: ${student.joining_date}`);
+
+    doc.end();
+    res.download(filePath);
+});
+
+// Start server
+app.listen(3000, () => {
+    console.log('Server is running on port 3000');
+});
+
+DELIMITER //
+
+CREATE PROCEDURE GenerateStudentReport()
+BEGIN
+    INSERT INTO report_student_enrollment (year, month, institute_name, course_name, registered_student_count)
+    SELECT 
+        YEAR(joining_date) AS year,
+        MONTH(joining_date) AS month,
+        i.institute_name,
+        c.course_name,
+        COUNT(s.student_id) AS registered_student_count
+    FROM 
+        student s
+    JOIN 
+        course c ON s.course_id = c.course_id
+    JOIN 
+        institute i ON s.institute_id = i.institute_id
+    GROUP BY 
+        year, month, i.institute_name, c.course_name;
+END //
+
+DELIMITER ;
